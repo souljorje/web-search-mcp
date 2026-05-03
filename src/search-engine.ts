@@ -931,15 +931,16 @@ export class SearchEngine {
   }
 
   private isValidSearchUrl(url: string): boolean {
-    // Google search results URLs can be in various formats
-    return url.startsWith('/url?') || 
-           url.startsWith('http://') || 
-           url.startsWith('https://') ||
-           url.startsWith('//') ||
-           url.startsWith('/search?') ||
-           url.startsWith('/') ||
-           url.includes('google.com') ||
-           url.length > 10; // Accept any reasonably long URL
+    if (url.startsWith('/url?') || url.startsWith('//')) {
+      return true;
+    }
+
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
   }
 
   private cleanGoogleUrl(url: string): string {

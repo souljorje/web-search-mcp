@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { Page } from 'playwright';
+import { BrowserContext, Page } from 'playwright';
 import { fetchText, isFetchError } from './fetch-utils.js';
 import { ContentExtractionOptions, SearchResult } from './types.js';
 import { cleanText, getWordCount, getContentPreview, generateTimestamp, isPdfUrl } from './utils.js';
@@ -61,14 +61,15 @@ export class EnhancedContentExtractor {
   }
 
   private async extractWithFetch(options: ContentExtractionOptions): Promise<string> {
-    const { url, timeout = this.defaultTimeout, maxContentLength = this.maxContentLength } = options;
+    const { url, timeout = this.defaultTimeout, maxContentLength = this.maxContentLength, signal } = options;
     
     const response = await fetchText(url, {
       headers: this.getRandomHeaders(),
+      signal,
       timeout,
     });
 
-    let content = this.parseContent(response.data);
+    let content = this.parseContent(response.data, maxContentLength);
     
     // Truncate content if it exceeds the limit (instead of failing the request)
     if (maxContentLength && content.length > maxContentLength) {
@@ -85,12 +86,18 @@ export class EnhancedContentExtractor {
   }
 
   private async extractWithBrowser(options: ContentExtractionOptions): Promise<string> {
-    const { url, timeout = this.defaultTimeout } = options;
+    const { url, timeout = this.defaultTimeout, maxContentLength = this.maxContentLength, signal } = options;
     
     const browser = await this.browserPool.getBrowser();
     const browserType = this.browserPool.getLastUsedBrowserType();
+    let context: BrowserContext | undefined;
+    let abortHandler: (() => void) | undefined;
     
     try {
+      if (signal?.aborted) {
+        throw new Error('Content extraction aborted');
+      }
+
       // Create context options based on browser capabilities
       const baseContextOptions = {
         userAgent: this.getRandomUserAgent(),
@@ -112,7 +119,14 @@ export class EnhancedContentExtractor {
         : { ...baseContextOptions, isMobile: Math.random() > 0.8 };
 
       // Create a new context for each request (isolation)
-      const context = await browser.newContext(contextOptions);
+      context = await browser.newContext(contextOptions);
+
+      if (signal) {
+        abortHandler = () => {
+          void context?.close().catch(() => {});
+        };
+        signal.addEventListener('abort', abortHandler, { once: true });
+      }
 
       // Add stealth scripts to avoid detection
       await context.addInitScript(() => {
@@ -178,7 +192,7 @@ export class EnhancedContentExtractor {
           
           // Create a new context with HTTP/1.1 preference
           await context.close();
-          const http1Context = await browser.newContext({
+          context = await browser.newContext({
             userAgent: this.getRandomUserAgent(),
             viewport: this.getRandomViewport(),
             locale: 'en-US',
@@ -189,7 +203,7 @@ export class EnhancedContentExtractor {
             }
           });
           
-          const http1Page = await http1Context.newPage();
+          const http1Page = await context.newPage();
           
           // Disable HTTP/2 by intercepting requests
           await http1Page.route('**/*', (route) => {
@@ -208,8 +222,7 @@ export class EnhancedContentExtractor {
           
           // Quick content extraction
           const html = await http1Page.content();
-          const content = this.parseContent(html);
-          await http1Context.close();
+          const content = this.parseContent(html, maxContentLength);
           return content;
         } else {
           throw gotoError;
@@ -233,14 +246,23 @@ export class EnhancedContentExtractor {
 
       // Extract content using the same parsing logic as the HTTP fetch path
       const html = await page.content();
-      const content = this.parseContent(html);
+      const content = this.parseContent(html, maxContentLength);
 
-      await context.close();
       return content;
 
     } catch (error) {
+      if (signal?.aborted) {
+        throw new Error('Content extraction aborted');
+      }
       console.error(`[BrowserExtractor] Browser extraction failed for ${url}:`, error);
       throw error;
+    } finally {
+      if (signal && abortHandler) {
+        signal.removeEventListener('abort', abortHandler);
+      }
+      if (context) {
+        await context.close().catch(() => {});
+      }
     }
   }
 
@@ -395,7 +417,7 @@ export class EnhancedContentExtractor {
     return timezones[Math.floor(Math.random() * timezones.length)];
   }
 
-  async extractContentForResults(results: SearchResult[], targetCount: number = results.length): Promise<SearchResult[]> {
+  async extractContentForResults(results: SearchResult[], targetCount: number = results.length, maxContentLength?: number): Promise<SearchResult[]> {
     console.log(`[EnhancedContentExtractor] Processing up to ${results.length} results to get ${targetCount} non-PDF results`);
     
     // Filter out PDF files first
@@ -406,19 +428,22 @@ export class EnhancedContentExtractor {
     
     // Process results concurrently with timeout
     const extractionPromises = resultsToProcess.map(async (result): Promise<SearchResult> => {
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, 8000);
+
       try {
-        // Use a race condition with timeout to prevent hanging
         const extractionPromise = this.extractContent({ 
           url: result.url, 
-          timeout: 6000 // Reduced timeout to 6 seconds per page
+          timeout: 6000, // Reduced timeout to 6 seconds per page
+          maxContentLength,
+          signal: controller.signal,
         });
-        
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Content extraction timeout')), 8000);
-        });
-        
-        const content = await Promise.race([extractionPromise, timeoutPromise]);
-        const cleanedContent = cleanText(content, this.maxContentLength);
+
+        const cleanedContent = await extractionPromise;
         
         console.log(`[EnhancedContentExtractor] Successfully extracted: ${result.url}`);
         return {
@@ -430,6 +455,7 @@ export class EnhancedContentExtractor {
           fetchStatus: 'success' as const,
         };
       } catch (error) {
+        const extractionError = timedOut ? new Error('Content extraction timeout') : error;
         console.log(`[EnhancedContentExtractor] Failed to extract: ${result.url} - ${error instanceof Error ? error.message : 'Unknown error'}`);
         return {
           ...result,
@@ -438,8 +464,10 @@ export class EnhancedContentExtractor {
           wordCount: 0,
           timestamp: generateTimestamp(),
           fetchStatus: 'error' as const,
-          error: this.getSpecificErrorMessage(error),
+          error: this.getSpecificErrorMessage(extractionError),
         };
+      } finally {
+        clearTimeout(timeoutId);
       }
     });
     
@@ -460,7 +488,7 @@ export class EnhancedContentExtractor {
     return enhancedResults;
   }
 
-  private parseContent(html: string): string {
+  private parseContent(html: string, maxContentLength: number = this.maxContentLength): string {
     const $ = cheerio.load(html);
     
     // Remove all script, style, and other non-content elements
@@ -531,7 +559,9 @@ export class EnhancedContentExtractor {
     // Clean up the text
     const cleanedContent = this.cleanTextContent(mainContent);
     
-    return cleanText(cleanedContent, this.maxContentLength);
+    return maxContentLength === 0
+      ? cleanText(cleanedContent, cleanedContent.length)
+      : cleanText(cleanedContent, maxContentLength);
   }
   
   private cleanTextContent(text: string): string {

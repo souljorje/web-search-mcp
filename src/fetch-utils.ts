@@ -2,6 +2,7 @@ type FetchTextOptions = {
   headers?: Record<string, string>;
   maxContentLength?: number;
   params?: Record<string, string>;
+  signal?: AbortSignal;
   timeout: number;
 };
 
@@ -43,7 +44,20 @@ export async function fetchText(url: string, options: FetchTextOptions): Promise
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), options.timeout);
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeout);
+  const abortHandler = () => controller.abort(options.signal?.reason);
+
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort(options.signal.reason);
+    } else {
+      options.signal.addEventListener('abort', abortHandler, { once: true });
+    }
+  }
 
   try {
     const response = await fetch(targetUrl, {
@@ -79,6 +93,18 @@ export async function fetchText(url: string, options: FetchTextOptions): Promise
       throw error;
     }
     if (error instanceof Error && error.name === 'AbortError') {
+      if (timedOut) {
+        throw new FetchError('Request timeout', {
+          cause: error,
+          code: 'ECONNABORTED',
+        });
+      }
+      if (options.signal?.aborted) {
+        throw new FetchError('Request aborted', {
+          cause: error,
+          code: 'ECANCELED',
+        });
+      }
       throw new FetchError('Request timeout', {
         cause: error,
         code: 'ECONNABORTED',
@@ -89,5 +115,6 @@ export async function fetchText(url: string, options: FetchTextOptions): Promise
     });
   } finally {
     clearTimeout(timeoutId);
+    options.signal?.removeEventListener('abort', abortHandler);
   }
 }
