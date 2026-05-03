@@ -139,7 +139,7 @@ The server supports several environment variables for configuration:
 - **`DEFAULT_TIMEOUT`**: Default timeout for requests in milliseconds (default: 6000)
 - **`MAX_BROWSERS`**: Maximum number of browser instances to maintain (default: 3)
 - **`BROWSER_TYPES`**: Comma-separated list of browser types to use (default: 'chromium,firefox', options: chromium, firefox, webkit)
-- **`BROWSER_FALLBACK_THRESHOLD`**: Number of fetch failures before using browser fallback (default: 3)
+- **`BROWSER_FALLBACK_THRESHOLD`**: Per-host number of qualifying fetch failures before using browser fallback (default: 3)
 
 ### Search Quality and Engine Selection
 

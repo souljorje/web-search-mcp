@@ -275,8 +275,7 @@ class WebSearchMCPServer {
             if (typeof maxLengthValue !== 'number' || isNaN(maxLengthValue) || maxLengthValue < 0) {
               throw new Error('Invalid maxContentLength: must be a non-negative number');
             }
-            // If maxContentLength is 0, treat it as "no limit" (undefined)
-            maxContentLength = maxLengthValue === 0 ? undefined : maxLengthValue;
+            maxContentLength = maxLengthValue;
           }
 
           console.log(`[MCP] Starting single page content extraction for: ${obj.url}`);

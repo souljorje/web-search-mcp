@@ -8,8 +8,9 @@ import { BrowserPool } from './browser-pool.js';
 export class EnhancedContentExtractor {
   private readonly defaultTimeout: number;
   private readonly maxContentLength: number;
+  private readonly browserFallbackThreshold: number;
   private browserPool: BrowserPool;
-  private fallbackThreshold: number;
+  private browserFallbackFailuresByHost: Map<string, number>;
 
   constructor() {
     this.defaultTimeout = parseInt(process.env.DEFAULT_TIMEOUT || '6000', 10);
@@ -23,11 +24,14 @@ export class EnhancedContentExtractor {
       console.warn(`[EnhancedContentExtractor] Invalid MAX_CONTENT_LENGTH value: ${envMaxLength}, using default 500000`);
       this.maxContentLength = 500000;
     }
+
+    const parsedBrowserFallbackThreshold = parseInt(process.env.BROWSER_FALLBACK_THRESHOLD || '3', 10);
+    this.browserFallbackThreshold = parsedBrowserFallbackThreshold > 0 ? parsedBrowserFallbackThreshold : 3;
     
     this.browserPool = new BrowserPool();
-    this.fallbackThreshold = parseInt(process.env.BROWSER_FALLBACK_THRESHOLD || '3', 10);
+    this.browserFallbackFailuresByHost = new Map();
     
-    console.log(`[EnhancedContentExtractor] Configuration: timeout=${this.defaultTimeout}, maxContentLength=${this.maxContentLength}, fallbackThreshold=${this.fallbackThreshold}`);
+    console.log(`[EnhancedContentExtractor] Configuration: timeout=${this.defaultTimeout}, maxContentLength=${this.maxContentLength}, browserFallbackThreshold=${this.browserFallbackThreshold}`);
   }
 
   async extractContent(options: ContentExtractionOptions): Promise<string> {
@@ -38,6 +42,7 @@ export class EnhancedContentExtractor {
     // First, try with regular HTTP client (faster)
     try {
       const content = await this.extractWithFetch(options);
+      this.resetBrowserFallbackFailures(url);
       console.log(`[EnhancedContentExtractor] Successfully extracted with fetch: ${content.length} chars`);
       return content;
     } catch (error) {
@@ -45,6 +50,12 @@ export class EnhancedContentExtractor {
       
       // Check if this looks like a case where browser would help
       if (this.shouldUseBrowser(error, url)) {
+        const failureCount = this.recordBrowserFallbackFailure(url);
+        if (failureCount < this.browserFallbackThreshold) {
+          console.log(`[EnhancedContentExtractor] Browser fallback threshold not reached for ${this.getBrowserFallbackHost(url)} (${failureCount}/${this.browserFallbackThreshold})`);
+          throw error;
+        }
+
         console.log(`[EnhancedContentExtractor] Falling back to headless browser for: ${url}`);
         try {
           const content = await this.extractWithBrowser(options);
@@ -325,6 +336,25 @@ export class EnhancedContentExtractor {
     ];
 
     return indicators.some(indicator => indicator === true);
+  }
+
+  private getBrowserFallbackHost(url: string): string {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return url;
+    }
+  }
+
+  private recordBrowserFallbackFailure(url: string): number {
+    const host = this.getBrowserFallbackHost(url);
+    const failureCount = (this.browserFallbackFailuresByHost.get(host) || 0) + 1;
+    this.browserFallbackFailuresByHost.set(host, failureCount);
+    return failureCount;
+  }
+
+  private resetBrowserFallbackFailures(url: string): void {
+    this.browserFallbackFailuresByHost.delete(this.getBrowserFallbackHost(url));
   }
 
   private isLowQualityContent(content: string): boolean {

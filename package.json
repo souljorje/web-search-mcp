@@ -13,6 +13,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node ./dist/index.js",
     "lint": "eslint \"src/**/*.ts\"",
+    "test": "node tests/test-search.js",
     "format": "prettier --write ."
   },
   "keywords": [

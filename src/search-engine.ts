@@ -8,10 +8,12 @@ import { BrowserPool } from './browser-pool.js';
 export class SearchEngine {
   private readonly rateLimiter: RateLimiter;
   private browserPool: BrowserPool;
+  private unavailableBrowserEngines: Set<string>;
 
   constructor() {
     this.rateLimiter = new RateLimiter(10); // 10 requests per minute
     this.browserPool = new BrowserPool();
+    this.unavailableBrowserEngines = new Set();
   }
 
   async search(options: SearchOptions): Promise<SearchResultWithMetadata> {
@@ -37,7 +39,7 @@ export class SearchEngine {
           { method: this.tryBrowserBingSearch.bind(this), name: 'Browser Bing' },
           { method: this.tryBrowserBraveSearch.bind(this), name: 'Browser Brave' },
           { method: this.tryDuckDuckGoSearch.bind(this), name: 'Fetch DuckDuckGo' }
-        ];
+        ].filter(approach => !this.unavailableBrowserEngines.has(approach.name));
         
         let bestResults: SearchResult[] = [];
         let bestEngine = 'None';
@@ -778,7 +780,6 @@ export class SearchEngine {
   }
 
   private parseBingResults(html: string, maxResults: number): SearchResult[] {
-    const debugBing = process.env.DEBUG_BING_SEARCH === 'true';
     console.error(`[SearchEngine] BING: Parsing HTML with length: ${html.length}`);
     
     const $ = cheerio.load(html);
@@ -980,16 +981,26 @@ export class SearchEngine {
   }
 
   private cleanBingUrl(url: string): string {
-    // Bing URLs are usually direct, but check for any redirect patterns
     if (url.startsWith('//')) {
       return 'https:' + url;
     }
-    
-    // If it's already a full URL, return as-is
-    if (url.startsWith('http://') || url.startsWith('https://')) {
+
+    try {
+      const parsed = new URL(url);
+
+      if (parsed.hostname.endsWith('bing.com') && parsed.pathname.startsWith('/ck/a')) {
+        const encodedTarget = parsed.searchParams.get('u');
+        if (encodedTarget?.startsWith('a1')) {
+          const decodedTarget = Buffer.from(encodedTarget.substring(2), 'base64').toString('utf8');
+          if (decodedTarget.startsWith('http://') || decodedTarget.startsWith('https://')) {
+            return decodedTarget;
+          }
+        }
+      }
+    } catch {
       return url;
     }
-    
+
     return url;
   }
 
@@ -1134,6 +1145,11 @@ export class SearchEngine {
   private async handleBrowserError(error: any, engineName: string, attemptNumber: number = 1): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error(`[SearchEngine] ${engineName} browser error (attempt ${attemptNumber}): ${errorMessage}`);
+
+    if ((engineName === 'Browser Bing' || engineName === 'Browser Brave') && this.isBrowserLaunchError(errorMessage)) {
+      this.unavailableBrowserEngines.add(engineName);
+      console.log(`[SearchEngine] Disabling ${engineName} for this process after launch failure`);
+    }
     
     // Check for specific browser-related errors
     if (errorMessage.includes('Target page, context or browser has been closed') ||
@@ -1150,6 +1166,12 @@ export class SearchEngine {
         console.error(`[SearchEngine] Failed to refresh browser pool: ${refreshError instanceof Error ? refreshError.message : 'Unknown error'}`);
       }
     }
+  }
+
+  private isBrowserLaunchError(errorMessage: string): boolean {
+    return errorMessage.includes('browserType.launch') ||
+      errorMessage.includes('Executable doesn\'t exist') ||
+      errorMessage.includes('Failed to launch');
   }
 
   async closeAll(): Promise<void> {
