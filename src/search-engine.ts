@@ -1,5 +1,5 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { fetchText, isFetchError } from './fetch-utils.js';
 import { SearchOptions, SearchResult, SearchResultWithMetadata } from './types.js';
 import { generateTimestamp, sanitizeQuery } from './utils.js';
 import { RateLimiter } from './rate-limiter.js';
@@ -36,7 +36,7 @@ export class SearchEngine {
         const approaches = [
           { method: this.tryBrowserBingSearch.bind(this), name: 'Browser Bing' },
           { method: this.tryBrowserBraveSearch.bind(this), name: 'Browser Brave' },
-          { method: this.tryDuckDuckGoSearch.bind(this), name: 'Axios DuckDuckGo' }
+          { method: this.tryDuckDuckGoSearch.bind(this), name: 'Fetch DuckDuckGo' }
         ];
         
         let bestResults: SearchResult[] = [];
@@ -103,11 +103,11 @@ export class SearchEngine {
       });
     } catch (error) {
       console.error('[SearchEngine] Search error:', error);
-      if (axios.isAxiosError(error)) {
-        console.error('[SearchEngine] Axios error details:', {
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          data: error.response?.data?.substring(0, 500),
+      if (isFetchError(error)) {
+        console.error('[SearchEngine] Fetch error details:', {
+          status: error.status,
+          statusText: error.statusText,
+          data: error.body?.substring(0, 500),
         });
       }
       throw new Error(`Failed to perform search: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -503,7 +503,7 @@ export class SearchEngine {
     console.log(`[SearchEngine] Trying DuckDuckGo as fallback...`);
     
     try {
-      const response = await axios.get('https://html.duckduckgo.com/html/', {
+      const response = await fetchText('https://html.duckduckgo.com/html/', {
         params: {
           q: query,
         },
@@ -517,7 +517,6 @@ export class SearchEngine {
           'Upgrade-Insecure-Requests': '1',
         },
         timeout,
-        validateStatus: (status: number) => status < 400,
       });
 
       console.log(`[SearchEngine] DuckDuckGo got response with status: ${response.status}`);

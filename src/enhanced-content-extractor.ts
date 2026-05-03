@@ -1,6 +1,6 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Page } from 'playwright';
+import { fetchText, isFetchError } from './fetch-utils.js';
 import { ContentExtractionOptions, SearchResult } from './types.js';
 import { cleanText, getWordCount, getContentPreview, generateTimestamp, isPdfUrl } from './utils.js';
 import { BrowserPool } from './browser-pool.js';
@@ -37,11 +37,11 @@ export class EnhancedContentExtractor {
     
     // First, try with regular HTTP client (faster)
     try {
-      const content = await this.extractWithAxios(options);
-      console.log(`[EnhancedContentExtractor] Successfully extracted with axios: ${content.length} chars`);
+      const content = await this.extractWithFetch(options);
+      console.log(`[EnhancedContentExtractor] Successfully extracted with fetch: ${content.length} chars`);
       return content;
     } catch (error) {
-      console.log(`[EnhancedContentExtractor] Axios failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.log(`[EnhancedContentExtractor] Fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       
       // Check if this looks like a case where browser would help
       if (this.shouldUseBrowser(error, url)) {
@@ -52,7 +52,7 @@ export class EnhancedContentExtractor {
           return content;
         } catch (browserError) {
           console.error(`[EnhancedContentExtractor] Browser extraction also failed:`, browserError);
-          throw new Error(`Both axios and browser extraction failed for ${url}`);
+          throw new Error(`Both fetch and browser extraction failed for ${url}`);
         }
       } else {
         throw error;
@@ -60,19 +60,17 @@ export class EnhancedContentExtractor {
     }
   }
 
-  private async extractWithAxios(options: ContentExtractionOptions): Promise<string> {
+  private async extractWithFetch(options: ContentExtractionOptions): Promise<string> {
     const { url, timeout = this.defaultTimeout, maxContentLength = this.maxContentLength } = options;
     
-    const response = await axios.get(url, {
+    const response = await fetchText(url, {
       headers: this.getRandomHeaders(),
       timeout,
-      // Remove maxContentLength from axios config - handle truncation manually
-      validateStatus: (status: number) => status < 400,
     });
 
     let content = this.parseContent(response.data);
     
-    // Truncate content if it exceeds the limit (instead of axios throwing an error)
+    // Truncate content if it exceeds the limit (instead of failing the request)
     if (maxContentLength && content.length > maxContentLength) {
       console.log(`[EnhancedContentExtractor] Content truncated from ${content.length} to ${maxContentLength} characters for ${url}`);
       content = content.substring(0, maxContentLength);
@@ -233,7 +231,7 @@ export class EnhancedContentExtractor {
         console.log(`[BrowserExtractor] No main content selector found, proceeding anyway`);
       }
 
-      // Extract content using the same logic as axios version
+      // Extract content using the same parsing logic as the HTTP fetch path
       const html = await page.content();
       const content = this.parseContent(html);
 
@@ -276,24 +274,24 @@ export class EnhancedContentExtractor {
   }
 
   private shouldUseBrowser(error: any, url: string): boolean {
-    // Conditions where browser is likely to succeed where axios failed
+    // Conditions where browser is likely to succeed where fetch failed
     const indicators = [
       // HTTP status codes that suggest bot detection
-      error.response?.status === 403,
-      error.response?.status === 429,
-      error.response?.status === 503,
+      error?.status === 403,
+      error?.status === 429,
+      error?.status === 503,
       
       // Error messages suggesting JS requirement
-      error.message?.includes('timeout'),
-      error.message?.includes('Access denied'),
-      error.message?.includes('Forbidden'),
-      error.message?.includes('Low quality content detected'),
+      error?.message?.includes('timeout'),
+      error?.message?.includes('Access denied'),
+      error?.message?.includes('Forbidden'),
+      error?.message?.includes('Low quality content detected'),
       
       // Response content suggesting bot detection
-      error.response?.data?.includes('Please enable JavaScript'),
-      error.response?.data?.includes('captcha'),
-      error.response?.data?.includes('unusual traffic'),
-      error.response?.data?.includes('robot'),
+      error?.body?.includes('Please enable JavaScript'),
+      error?.body?.includes('captcha'),
+      error?.body?.includes('unusual traffic'),
+      error?.body?.includes('robot'),
       
       // Sites known to be JS-heavy
       url.includes('twitter.com'),
@@ -562,21 +560,21 @@ export class EnhancedContentExtractor {
   }
 
   private getSpecificErrorMessage(error: unknown): string {
-    if (axios.isAxiosError(error)) {
+    if (isFetchError(error)) {
       if (error.code === 'ECONNABORTED') {
         return 'Request timeout';
       }
-      if (error.response?.status === 403) {
+      if (error.status === 403) {
         return '403 Forbidden - Access denied';
       }
-      if (error.response?.status === 404) {
+      if (error.status === 404) {
         return '404 Not found';
       }
-      if (error.message.includes('maxContentLength')) {
+      if (error.code === 'MAX_CONTENT_LENGTH_EXCEEDED' || error.message.includes('maxContentLength')) {
         return 'Content too long';
       }
-      if (error.response?.status) {
-        return `HTTP ${error.response.status}: ${error.message}`;
+      if (error.status) {
+        return `HTTP ${error.status}: ${error.message}`;
       }
       return `Network error: ${error.message}`;
     }
