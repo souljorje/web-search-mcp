@@ -2,6 +2,21 @@
 
 A TypeScript MCP (Model Context Protocol) server that provides comprehensive web search capabilities using direct connections (no API keys required) with multiple tools for different use cases.
 
+## Fork Changes
+
+This fork includes a few targeted changes:
+
+- Replaced `axios` with native `fetch`
+- Logs are routed away from stdout so `StdioServerTransport` does not corrupt MCP responses
+- `full-web-search` now respects the `maxContentLength` argument
+- Timed-out extractions now cancel underlying work and clean up browser contexts properly
+- Browser fallback is now gated per host via `BROWSER_FALLBACK_THRESHOLD` instead of jumping to Playwright immediately
+- Browser engines that fail to launch are disabled for the rest of the process so search can fall back cleanly
+- Bing redirect URLs are decoded more reliably before content extraction
+- Rate limiting now runs inside the concurrency gate, avoiding races under parallel load
+- Search result URL validation is stricter to avoid junk/internal links
+- Added `npm test` plus a fetch-based DuckDuckGo test path
+
 ## Features
 
 - **Multi-Engine Web Search**: Prioritises Bing > Brave > DuckDuckGo for optimal reliability and performance
